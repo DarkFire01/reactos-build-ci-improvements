@@ -5,9 +5,8 @@ import urllib2
 from HTMLParser import HTMLParser
 
 # IP address of your Windows 7 VM
-SERVER_URL = "http://192.168.37.16"
+SERVER_URL = "http://192.168.37.16:8000"
 LOCAL_TESTS_DIR = r"C:\tests"
-
 
 class SimpleDirectoryParser(HTMLParser):
 
@@ -23,7 +22,6 @@ class SimpleDirectoryParser(HTMLParser):
 
 
 def download_folder(remote_folder_name, relative_path=""):
-    """Recursively downloads a directory tree over HTTP in Python 2.7."""
     remote_url = (
         SERVER_URL
         + "/"
@@ -39,45 +37,49 @@ def download_folder(remote_folder_name, relative_path=""):
         os.makedirs(local_target)
 
     req = urllib2.urlopen(remote_url)
-    html_content = req.read().decode("utf-8")
-
     parser = SimpleDirectoryParser()
-    parser.feed(html_content)
+    parser.feed(req.read().decode("utf-8"))
 
     for link in parser.links:
         if link in ["../", "./", "/"]:
             continue
 
         decoded = urllib.unquote(link)
-
         if link.endswith("/"):
-            # Recurse into subfolder
-            subfolder_name = decoded.rstrip("/")
-            next_relative = (
-                relative_path + urllib.quote(remote_folder_name) + "/"
+            download_folder(
+                decoded.rstrip("/"),
+                relative_path + urllib.quote(remote_folder_name) + "/",
             )
-            download_folder(subfolder_name, next_relative)
         else:
-            # Download file
             file_url = remote_url + urllib.quote(decoded)
-            local_file_path = os.path.join(local_target, decoded)
-            print "Downloading: " + decoded
-            urllib.urlretrieve(file_url, local_file_path)
+            urllib.urlretrieve(
+                file_url, os.path.join(local_target, decoded)
+            )
 
 
-def fetch_and_claim_latest_test():
-    """Finds the first folder on the Win7 server, downloads it, and deletes remote copy."""
+def notify_download_complete(folder_name):
+    done_url = SERVER_URL + "/download-complete"
+    req = urllib2.Request(done_url, data=folder_name.encode("utf-8"))
+    try:
+        response = urllib2.urlopen(req)
+        if response.getcode() == 200:
+            print "[CLIENT] Win7 server released to prepare next build."
+    except Exception as e:
+        print "[CLIENT] Failed to notify Win7 server: " + str(e)
+
+
+def main():
+    # 1. Query Win7 host
     try:
         req = urllib2.urlopen(SERVER_URL)
         html_content = req.read().decode("utf-8")
     except Exception as e:
-        print "Failed to connect to Win7 server: " + str(e)
+        print "[CLIENT] Server not ready or no builds available: " + str(e)
         return False
 
     parser = SimpleDirectoryParser()
     parser.feed(html_content)
 
-    # Filter out directory links to isolate target folder names
     folders = [
         urllib.unquote(l.rstrip("/"))
         for l in parser.links
@@ -85,33 +87,20 @@ def fetch_and_claim_latest_test():
     ]
 
     if not folders:
-        print "No test packages available on server."
+        print "[CLIENT] No folders found to download."
         return False
 
     target_folder = folders[0]
-    print "Downloading test suite: " + target_folder
+    print "[CLIENT] Downloading build folder: " + target_folder
 
-    # Clean destination directory before extraction
-    if os.path.exists(LOCAL_TESTS_DIR):
-        shutil.rmtree(LOCAL_TESTS_DIR)
-
+    # 2. Perform the download into C:\tests
     download_folder(target_folder)
+    print "[CLIENT] Download complete."
 
-    # Send POST request to Win7 server to delete the folder
-    print "Requesting remote deletion of: " + target_folder
-    delete_url = SERVER_URL + "/delete"
-    post_data = target_folder.encode("utf-8")
-
-    req = urllib2.Request(delete_url, data=post_data)
-    try:
-        response = urllib2.urlopen(req)
-        if response.getcode() == 200:
-            print "Server deleted remote copy successfully."
-    except Exception as e:
-        print "Failed to delete remote folder: " + str(e)
-
+    # 3. IMMEDIATELY notify Win7 so its server script exits and Buildbot unblocks
+    notify_download_complete(target_folder)
     return True
 
 
 if __name__ == "__main__":
-    fetch_and_claim_latest_test()
+    main()
