@@ -1,12 +1,13 @@
 import os
-import shutil
+import time
 import urllib
 import urllib2
 from HTMLParser import HTMLParser
 
-# IP address of your Windows 7 VM
 SERVER_URL = "http://192.168.37.16:8000"
 LOCAL_TESTS_DIR = r"C:\tests"
+POLL_INTERVAL = 5  # Seconds to wait before checking again
+
 
 class SimpleDirectoryParser(HTMLParser):
 
@@ -63,44 +64,46 @@ def notify_download_complete(folder_name):
     try:
         response = urllib2.urlopen(req)
         if response.getcode() == 200:
-            print "[CLIENT] Win7 server released to prepare next build."
+            print "[CLIENT] Win7 server notified and unblocked."
     except Exception as e:
         print "[CLIENT] Failed to notify Win7 server: " + str(e)
 
 
-def main():
-    # 1. Query Win7 host
-    try:
-        req = urllib2.urlopen(SERVER_URL)
-        html_content = req.read().decode("utf-8")
-    except Exception as e:
-        print "[CLIENT] Server not ready or no builds available: " + str(e)
-        return False
+def wait_and_fetch():
+    print "[CLIENT] Waiting for Win7 test server to become available..."
 
-    parser = SimpleDirectoryParser()
-    parser.feed(html_content)
+    while True:
+        try:
+            req = urllib2.urlopen(SERVER_URL, timeout=3)
+            html_content = req.read().decode("utf-8")
 
-    folders = [
-        urllib.unquote(l.rstrip("/"))
-        for l in parser.links
-        if l.endswith("/") and l not in ["../", "./", "/"]
-    ]
+            parser = SimpleDirectoryParser()
+            parser.feed(html_content)
 
-    if not folders:
-        print "[CLIENT] No folders found to download."
-        return False
+            folders = [
+                urllib.unquote(l.rstrip("/"))
+                for l in parser.links
+                if l.endswith("/") and l not in ["../", "./", "/"]
+            ]
 
-    target_folder = folders[0]
-    print "[CLIENT] Downloading build folder: " + target_folder
+            if folders:
+                target_folder = folders[0]
+                print "[CLIENT] Found test folder: " + target_folder
+                print "[CLIENT] Downloading..."
 
-    # 2. Perform the download into C:\tests
-    download_folder(target_folder)
-    print "[CLIENT] Download complete."
+                download_folder(target_folder)
+                print "[CLIENT] Download complete."
 
-    # 3. IMMEDIATELY notify Win7 so its server script exits and Buildbot unblocks
-    notify_download_complete(target_folder)
-    return True
+                # Notify Win7 to delete the source folder and exit server.py
+                notify_download_complete(target_folder)
+                return True
+
+        except Exception:
+            # Server isn't up yet or no folders are present; retry silently
+            pass
+
+        time.sleep(POLL_INTERVAL)
 
 
 if __name__ == "__main__":
-    main()
+    wait_and_fetch()
